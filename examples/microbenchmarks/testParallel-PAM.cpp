@@ -11,15 +11,18 @@
 
 #include <pam/pam.h>
 #include <pam/parse_command_line.h>
-#include <cpam/cpam.h>
 
+#include <parlay/primitives.h>
 #include <parlay/random.h>
+#include <unordered_map>
+
+namespace cpam {
 
 timer t;
 
 using namespace std;
 
-//using key_type = unsigned int;
+// using key_type = unsigned int;
 using key_type = size_t;
 
 bool do_check = false;
@@ -28,6 +31,13 @@ struct Add {
   using T = key_type;
   static T add(T a, T b) { return a + b; }
   static T identity() { return 0; }
+};
+
+struct Add_Pair {
+  using T = std::pair<key_type, key_type>;
+  Add_Pair() : identity({0, 0}) {}
+  T identity;
+  static T f(T a, T b) { return {a.first + b.first, a.second + b.second}; }
 };
 
 struct entry {
@@ -60,10 +70,16 @@ using tmap = pam_map<entry>;
 using tmap = aug_map<entry>;
 #endif
 
-//using tmap = pam_map<entry>;
-//using tmap = aug_map<entry>;
-//using tmap = pam_set<entry>;
-//using tmap = diff_encoded_map<entry>;
+#ifdef USE_DIFF_ENCODING
+using tset = pam_set<entry, 256, diffencoded_entry_encoder>;
+#else
+using tset = pam_set<entry>;
+#endif
+
+// using tmap = pam_map<entry>;
+// using tmap = aug_map<entry>;
+// using tmap = pam_set<entry>;
+// using tmap = diff_encoded_map<entry>;
 
 struct mapped {
   key_type k, v;
@@ -113,7 +129,7 @@ parlay::sequence<par> uniform_input(size_t n, size_t window,
 
 parlay::sequence<par> uniform_input_unsorted(size_t n, size_t window) {
   auto f = [&](size_t i) {
-    uniform_int_distribution<> r_keys(1, window);
+    uniform_int_distribution<size_t> r_keys(1, window);
     key_type k = r_keys(get_rand_gen());
     key_type c = r_keys(get_rand_gen());
     return make_pair(k, c);
@@ -122,8 +138,19 @@ parlay::sequence<par> uniform_input_unsorted(size_t n, size_t window) {
   return v;
 }
 
-bool check_union(const tmap& m1, const tmap& m2, const tmap& m3) {
-  std::cout << "m1.size = " << m1.size() << " m2.size = " << m2.size() << std::endl;
+parlay::sequence<key_type> uniform_input_unsorted2(size_t n, size_t window) {
+  auto f = [&](size_t i) {
+    uniform_int_distribution<size_t> r_keys(1, window);
+    key_type k = r_keys(get_rand_gen());
+    return k;
+  };
+  auto v = parlay::sequence<key_type>::from_function(n, f);
+  return v;
+}
+
+bool check_union(const tmap &m1, const tmap &m2, const tmap &m3) {
+  std::cout << "m1.size = " << m1.size() << " m2.size = " << m2.size()
+            << std::endl;
   vector<key_type> e1(m1.size());
   vector<key_type> e2(m2.size());
   vector<key_type> e3;
@@ -298,7 +325,7 @@ auto union_inner(size_t n, size_t m) {
     check(m2.size() == mx, "map size is wrong.");
     check(check_union(m1, m2, m3), "union is wrong");
   }
-  return std::make_pair(m3, tm);
+  return std::make_tuple(m3, tm);
 }
 
 double test_union(size_t n, size_t m) {
@@ -456,18 +483,137 @@ double test_map(size_t n) {
   return tm;
 }
 
+tmap build_slow(par *A, size_t n) {
+  if (n <= 0)
+    return tmap();
+  if (n == 1)
+    return tmap(A[0]);
+  size_t mid = n / 2;
+
+  tmap a, b;
+  auto left = [&]() { a = build_slow(A, mid); };
+  auto right = [&]() { b = build_slow(A + mid, n - mid); };
+
+  parlay::par_do_if(n > 100, left, right);
+
+  return tmap::map_union(std::move(a), std::move(b));
+}
+
+tset build_slow2(key_type *A, size_t n) {
+  if (n <= 0)
+    return tset();
+  if (n == 1)
+    return tset(A[0]);
+  size_t mid = n / 2;
+
+  tset a, b;
+  auto left = [&]() { a = build_slow2(A, mid); };
+  auto right = [&]() { b = build_slow2(A + mid, n - mid); };
+
+  parlay::par_do_if(n > 100, left, right);
+
+  return tset::map_union(std::move(a), std::move(b));
+}
+
 double test_reduce(size_t n) {
-  parlay::sequence<par> v = uniform_input(n, 20, true);
-  tmap m1(v);
+  parlay::sequence<par> v = uniform_input_unsorted(n, 1UL << 40);
 
-  timer t; t.start();
+  tmap m1 = build_slow(v.data(), n);
 
-  auto f = [&](par e) { return std::get<1>(e); };
-  tmap::map_reduce(m1, f, Add());
+  timer t;
+  t.start();
+
+  auto f = [&](par e) { return std::get<0>(e); };
+  auto sum = tmap::map_reduce(m1, f, Add());
 
   double tm = t.stop();
 
+  auto noop = [&](const auto &et) { return 0; };
+  size_t size_in_bytes = m1.size_in_bytes(noop);
+  std::cout << "sum = " << sum << " size in bytes = " << size_in_bytes << "\n";
+
   return tm;
+}
+double test_reduce2(size_t n) {
+  parlay::sequence<par> v = uniform_input_unsorted(n, 1UL << 40);
+  tmap m1(v);
+
+  timer t;
+  t.start();
+
+  auto f = [&](par e) { return std::get<1>(e); };
+  auto sum = tmap::map_reduce(m1, f, Add());
+
+  double tm = t.stop();
+
+  auto test_sum = std::get<1>(v[0]);
+  for (size_t i = 1; i < n; i++) {
+    test_sum += std::get<1>(v[i]);
+  }
+  std::cout << "sum = " << sum << " correct_sum = " << test_sum << "\n";
+
+  return tm;
+}
+
+double test_reduce3(size_t n) {
+  parlay::sequence<par> v = uniform_input_unsorted(n, 1UL << 40);
+  std::unordered_map<key_type, key_type> correct;
+  key_type test_sum = 0;
+  for (size_t i = 0; i < n; i++) {
+    correct[std::get<0>(v[i])] = std::get<1>(v[i]);
+  }
+  for (auto p : correct) {
+    test_sum += p.second;
+  }
+  tmap m1 = build_slow(v.data(), n);
+
+  timer t;
+  t.start();
+
+  auto f = [&](par e) { return std::get<1>(e); };
+  auto sum = tmap::map_reduce(m1, f, Add());
+
+  double tm = t.stop();
+
+  std::cout << "sum = " << sum << " correct_sum = " << test_sum << "\n";
+
+  return tm;
+}
+
+double test_map_range(size_t n, size_t range_size) {
+  parlay::sequence<key_type> v = uniform_input_unsorted2(n, 1UL << 40);
+
+  parlay::sequence<key_type> range_start =
+      uniform_input_unsorted2(100000, (1UL << 40) - range_size);
+  tset m1 = build_slow2(v.data(), n);
+  timer t;
+  t.start();
+  if (range_size > 0) {
+    auto res = parlay::reduce(
+        parlay::map(range_start,
+                    [&](key_type &p) {
+                      uint64_t counter = 0;
+                      uint64_t total = 0;
+                      tset m2 = tset::range(m1, p, p + range_size);
+                      tset::map_void(
+                          m2,
+                          [&counter, &total](auto elem) {
+                            counter += 1;
+                            total += elem;
+                          },
+                          std::numeric_limits<uint64_t>::max());
+                      return std::pair<uint64_t, uint64_t>(counter, total);
+                    }),
+        Add_Pair());
+
+    double tm = t.stop();
+
+    std::cout << "total found = " << std::get<0>(res) << " sum was "
+              << std::get<1>(res) << "\n";
+
+    return tm;
+  }
+  return 0;
 }
 
 double test_update(size_t n) {
@@ -505,21 +651,6 @@ double test_update(size_t n) {
   return tm;
 }
 
-
-tmap build_slow(par* A, size_t n) {
-  if (n <= 0) return tmap();
-  if (n == 1) return tmap(A[0]);
-  size_t mid = n / 2;
-
-  tmap a, b;
-  auto left = [&]() { a = build_slow(A, mid); };
-  auto right = [&]() { b = build_slow(A + mid, n - mid); };
-
-  parlay::par_do_if(n > 100, left, right);
-
-  return tmap::map_union(std::move(a), std::move(b));
-}
-
 double test_multi_insert(size_t n, size_t m) {
 //  parlay::sequence<par> v = uniform_input(n, 20, true);
 //  parlay::sequence<par> u = uniform_input(m, (n / m) * 20, true);
@@ -544,6 +675,175 @@ double test_dest_multi_insert(size_t n, size_t m) {
   t.start();
   m1 = tmap::multi_insert(move(m1), u);
   double tm = t.stop();
+
+  // check(check_multi_insert(v, u, m1), "multi_insert wrong");
+
+  return tm;
+}
+
+double test_dest_multi_insert2(size_t n, size_t m) {
+  parlay::sequence<key_type> v = uniform_input_unsorted2(n, 1UL << 40);
+  std::vector<parlay::sequence<key_type>> us;
+  for (size_t i = 0; i < n / m; i++) {
+    us.push_back(uniform_input_unsorted2(m, 1UL << 40));
+  }
+  tset m1 = build_slow2(v.data(), n);
+  // std::cout << "number elements = " << m1.size() << "\n";
+  // return 0;
+  timer t;
+  t.start();
+  if (m > 0) {
+    for (size_t i = 0; i < n / m; i++) {
+      m1 = tset::multi_insert(move(m1), us[i]);
+    }
+  }
+  double tm = t.stop();
+  // std::cout << "number elements = " << m1.size() << "\n";
+
+  // check(check_multi_insert(v, u, m1), "multi_insert wrong");
+
+  return tm;
+}
+
+class parallel_zipf {
+  double c = 0; // Normalization constant
+  double alpha;
+  uint64_t max;
+  parlay::sequence<double> sum_probs; // Pre-calculated sum of probabilities
+  std::uniform_real_distribution<double> dist;
+
+public:
+  parallel_zipf(uint64_t m, double a, uint64_t seed) : alpha(a), max(m) {
+    dist = std::uniform_real_distribution<double>(0, 1);
+    // double c_test = 0;
+    // for (uint64_t i = 1; i <= max; i++) {
+    //   c_test = c_test + (1.0 / pow((double)i, alpha));
+    // }
+    // c_test = 1.0 / c_test;
+
+    auto c_vec = parlay::delayed_tabulate(
+        max, [&](size_t i) { return (1.0 / pow((double)i + 1, alpha)); });
+    c = parlay::reduce(c_vec);
+    c = 1.0 / c;
+    // std::vector<double> sum_probs_test;
+    // sum_probs_test.reserve(max + 1);
+    // sum_probs_test.push_back(0);
+    // for (uint64_t i = 1; i <= max; i++) {
+    //   sum_probs_test.push_back(sum_probs_test[i - 1] +
+    //                            c / pow((double)i, alpha));
+    // }
+    sum_probs = parlay::tabulate(max + 1, [&](size_t i) {
+      if (i == 0) {
+        return 0.0;
+      } else {
+        return c / pow((double)i, alpha);
+      }
+    });
+    parlay::scan_inclusive_inplace(sum_probs);
+  }
+
+  uint64_t gen() {
+    double z;
+    // Pull a uniform random number (0 < z < 1)
+    do {
+      z = dist(get_rand_gen());
+    } while (z == 0);
+
+    // Map z to the value
+    uint64_t low = 1;
+    uint64_t high = max;
+    do {
+      uint64_t mid = (low + high) / 2;
+      if (sum_probs[mid] >= z && sum_probs[mid - 1] < z) {
+        // Assert that zipf_value is between 1 and N
+        assert((mid >= 1) && (mid <= max));
+        return mid;
+      }
+      if (sum_probs[mid] >= z) {
+        high = mid - 1;
+      } else {
+        low = mid + 1;
+      }
+    } while (low <= high);
+    assert(false);
+    return 1;
+  }
+  parlay::sequence<uint64_t> gen_vector(uint64_t count) {
+    return parlay::tabulate(count, [&](size_t i) {
+      double z;
+      // Pull a uniform random number (0 < z < 1)
+      do {
+        z = dist(get_rand_gen());
+      } while (z == 0);
+      uint64_t low = 1;
+      uint64_t high = max;
+      do {
+        uint64_t mid = (low + high) / 2;
+        if (sum_probs[mid] >= z && sum_probs[mid - 1] < z) {
+          // Assert that zipf_value is between 1 and N
+          assert((mid >= 1) && (mid <= max));
+          return mid;
+        }
+        if (sum_probs[mid] >= z) {
+          high = mid - 1;
+        } else {
+          low = mid + 1;
+        }
+      } while (low <= high);
+      assert(false);
+      return 1UL;
+    });
+  }
+};
+
+double test_dest_multi_insert2_zip(size_t n, size_t m) {
+  parlay::sequence<key_type> v = uniform_input_unsorted2(n, 1UL << 34);
+  std::vector<parlay::sequence<key_type>> us;
+  parallel_zipf zip(34, .99, 0);
+  for (size_t i = 0; i < n / m; i++) {
+    us.push_back(zip.gen_vector(m));
+  }
+  tset m1 = build_slow2(v.data(), n);
+  // std::cout << "number elements = " << m1.size() << "\n";
+  // return 0;
+  timer t;
+  t.start();
+  if (m > 0) {
+    for (size_t i = 0; i < n / m; i++) {
+      m1 = tset::multi_insert(move(m1), us[i]);
+    }
+  }
+  double tm = t.stop();
+  std::cout << "number elements = " << m1.size() << "\n";
+
+  // check(check_multi_insert(v, u, m1), "multi_insert wrong");
+
+  return tm;
+}
+
+double test_dest_multi_insert_cache(size_t n, size_t m) {
+
+  tmap m1;
+  timer t;
+  t.start();
+
+  // auto v = uniform_input_unsorted(n, 1UL<<40);
+
+  // for (size_t i = 0; i < n; i++) {
+  //   par el = v[i];
+  //   // par el = {i,i};
+  //   m1.insert(el);
+  //   std::cout <<std::get<0>(el) <<", " <<std::get<1>(el)  << " number
+  //   elements = " << m1.size() << "\n";
+  // }
+
+  for (size_t i = 0; i < n / m; i++) {
+    auto v = uniform_input_unsorted(m, 1UL << 40);
+    m1 = tmap::multi_insert(move(m1), v);
+  }
+
+  double tm = t.stop();
+  std::cout << "number elements = " << m1.size() << "\n";
 
   // check(check_multi_insert(v, u, m1), "multi_insert wrong");
 
@@ -586,7 +886,6 @@ double stl_insertion_build(size_t n) {
 
   return tm;
 }
-
 
 double test_build(size_t n) {
   // parlay::sequence<par> v = uniform_input_unsorted(n, 1000000000);
@@ -650,50 +949,50 @@ double test_filter(size_t n) {
   return tm;
 }
 
-//double test_map_reduce(size_t n) {
-//  parlay::sequence<par> v = uniform_input(n, 20);
-//  tmap m1(v);
+// double test_map_reduce(size_t n) {
+//   parlay::sequence<par> v = uniform_input(n, 20);
+//   tmap m1(v);
 //
-//  timer t;
-//  auto f = [&](par e) { return e.second; };
-//  t.start();
-//  tmap::map_reduce(m1, f, Add());
-//  double tm = t.stop();
+//   timer t;
+//   auto f = [&](par e) { return e.second; };
+//   t.start();
+//   tmap::map_reduce(m1, f, Add());
+//   double tm = t.stop();
 //
-//  return tm;
-//}
+//   return tm;
+// }
 
-//double test_map_filter(size_t n) {
-//  parlay::sequence<par> v = uniform_input(n, 20);
-//  auto m1 = tmap(v);
-//  timer t;
-//  t.start();
-//  auto cond = [](par t) { return (t.first & 1) == 1; };
-//  auto res = tmap::map_filter(m1, cond);
-//  double tm = t.stop();
+// double test_map_filter(size_t n) {
+//   parlay::sequence<par> v = uniform_input(n, 20);
+//   auto m1 = tmap(v);
+//   timer t;
+//   t.start();
+//   auto cond = [](par t) { return (t.first & 1) == 1; };
+//   auto res = tmap::map_filter(m1, cond);
+//   double tm = t.stop();
 //
-//  tmap::GC::alloc::print_stats();
-//  check(res.ref_cnt() == 1, "ref cnt is wrong");
-//  check(m1.ref_cnt() == 1, "ref cnt is wrong");
+//   tmap::GC::alloc::print_stats();
+//   check(res.ref_cnt() == 1, "ref cnt is wrong");
+//   check(m1.ref_cnt() == 1, "ref cnt is wrong");
 //
-//  return tm;
-//}
+//   return tm;
+// }
 
-//double test_map_set(size_t n) {
-//  parlay::sequence<par> v = uniform_input(n, 20);
-//  auto m1 = tmap(v);
-//  timer t;
-//  t.start();
-//  auto f = [](par t) { return t; };  /* identity */
-//  auto res = tmap::map_set(m1, f);
-//  double tm = t.stop();
+// double test_map_set(size_t n) {
+//   parlay::sequence<par> v = uniform_input(n, 20);
+//   auto m1 = tmap(v);
+//   timer t;
+//   t.start();
+//   auto f = [](par t) { return t; };  /* identity */
+//   auto res = tmap::map_set(m1, f);
+//   double tm = t.stop();
 //
-//  tmap::GC::alloc::print_stats();
-//  check(res.ref_cnt() == 1, "ref cnt is wrong");
-//  check(m1.ref_cnt() == 1, "ref cnt is wrong");
+//   tmap::GC::alloc::print_stats();
+//   check(res.ref_cnt() == 1, "ref cnt is wrong");
+//   check(m1.ref_cnt() == 1, "ref cnt is wrong");
 //
-//  return tm;
-//}
+//   return tm;
+// }
 
 double test_aug_filter(size_t n, size_t m) {
   parlay::sequence<par> v = uniform_input(n, 20);
@@ -853,15 +1152,14 @@ double test_find(size_t n, size_t m) {
 }
 
 double test_size(size_t n) {
-  parlay::sequence<par> v1 = uniform_input(n, 20);
-  tmap m1(v1);
+  parlay::sequence<key_type> v1 = uniform_input_unsorted2(n, 1UL << 40);
+  tset m1(v1);
 
-  auto noop = [&] (const auto& et) {
-    return 0;
-  };
+  auto noop = [&](const auto &et) { return 0; };
   size_t size_in_bytes = m1.size_in_bytes(noop);
 
-  std::cout << "RESULT: n = " << n << ", size in bytes = " << size_in_bytes << std::endl;
+  std::cout << "RESULT: n = " << n << ", size in bytes = " << size_in_bytes
+            << std::endl;
 
 //  uint8_t tmp[8];
 //  size_t bytes = sizeof(key_type)*v1.size(); // values
@@ -1103,41 +1401,48 @@ double stl_vector_union(size_t n, size_t m) {
 //  return tm;
 //}
 
-string test_name[] = {"persistent-union",                      // 0
-                      "persistent-intersect",                  // 1
-                      "insert",                                // 2
-                      "std::map-insert",                       // 3
-                      "build",                                 // 4
-                      "filter",                                // 5
-                      "destructive-union",                     // 6
-                      "destructive-intersect",                 // 7
-                      "split",                                 // 8
-                      "difference",                            // 9
-                      "std::set_union",                        // 10
-                      "std::vector_union",                     // 11
-                      "find",                                  // 12
-                      "delete",                                // 13
-                      "multi_insert",                          // 14
-                      "destructive multi_insert",              // 15
-                      "stl_insertion_build",                   // 16
-                      "test_deletion_destroy",                 // 17
-                      "test_range",                            // 18
-                      "test_aug_range",                        // 19
-                      "test_insertion_build",                  // 20
-                      "stl_delete_destroy",                    // 21
-                      "test_aug_left",                         // 22
-                      "stl_map_union",                         // 23
-                      "aug_filter",                            // 24
-                      "insertion_build_persistent",            // 25
-                      "test_incremental_union_nonpersistent",  // 26
-                      "intersect_multi_type",                  // 27
-                      "flat_aug_range",                        // 28
-                      "test_map_reduce",                       // 29
-                      "test_map_filter",                       // 30
-                      "test_map_set",                          // 31
-                      "test_update",                           // 32
-                      "test_map",                              // 33
-                      "test_reduce",                           // 34
+string test_name[] = {"persistent-union",                     // 0
+                      "persistent-intersect",                 // 1
+                      "insert",                               // 2
+                      "std::map-insert",                      // 3
+                      "build",                                // 4
+                      "filter",                               // 5
+                      "destructive-union",                    // 6
+                      "destructive-intersect",                // 7
+                      "split",                                // 8
+                      "difference",                           // 9
+                      "std::set_union",                       // 10
+                      "std::vector_union",                    // 11
+                      "find",                                 // 12
+                      "delete",                               // 13
+                      "multi_insert",                         // 14
+                      "destructive multi_insert",             // 15
+                      "stl_insertion_build",                  // 16
+                      "test_deletion_destroy",                // 17
+                      "test_range",                           // 18
+                      "test_aug_range",                       // 19
+                      "test_insertion_build",                 // 20
+                      "stl_delete_destroy",                   // 21
+                      "test_aug_left",                        // 22
+                      "stl_map_union",                        // 23
+                      "aug_filter",                           // 24
+                      "insertion_build_persistent",           // 25
+                      "test_incremental_union_nonpersistent", // 26
+                      "intersect_multi_type",                 // 27
+                      "flat_aug_range",                       // 28
+                      "test_map_reduce",                      // 29
+                      "test_map_filter",                      // 30
+                      "test_map_set",                         // 31
+                      "test_update",                          // 32
+                      "test_map",                             // 33
+                      "test_reduce",                          // 34
+                      "test_size",                            // 35
+                      "test_reduce2",                         // 36
+                      "test_multi_insert2",                   // 37
+                      "test_reduce3",                         // 38
+                      "test_multi_insert_cache",              // 39
+                      "test_map_range",                       // 40
+                      "test_multi_insert2_zip",               // 41
                       "nothing"};
 
 //double flat_aug_range(size_t n, size_t m) {
@@ -1239,6 +1544,18 @@ double execute(size_t id, size_t n, size_t m) {
       return test_reduce(n);
     case 35:
       return test_size(n);
+    case 36:
+      return test_reduce2(n);
+    case 37:
+      return test_dest_multi_insert2(n, m);
+    case 38:
+      return test_reduce3(n);
+    case 39:
+      return test_dest_multi_insert_cache(n, m);
+    case 40:
+      return test_map_range(n, m);
+    case 41:
+      return test_dest_multi_insert2_zip(n, m);
     default:
       assert(false);
       return 0.0;
@@ -1272,6 +1589,8 @@ void test_loop(size_t n, size_t m, size_t repeat, size_t test_id,
     std::endl;
 }
 
+}
+
 int main(int argc, char* argv[]) {
   commandLine P(
       argc, argv,
@@ -1279,9 +1598,9 @@ int main(int argc, char* argv[]) {
   size_t n = P.getOptionLongValue("-n", 10000000);
   size_t m = P.getOptionLongValue("-m", n);
   size_t repeat = P.getOptionIntValue("-r", 5);
-  size_t test_id = str_to_int(P.getArgument(0));
-  do_check = P.getOption("-check");
+  size_t test_id = cpam::str_to_int(P.getArgument(0));
+  cpam::do_check = P.getOption("-check");
   bool randomize = P.getOption("-p");
-  test_loop(n, m, repeat, test_id, randomize);
+  cpam::test_loop(n, m, repeat, test_id, randomize);
   return 0;
 }

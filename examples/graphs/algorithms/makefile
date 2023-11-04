@@ -1,4 +1,4 @@
-all: bfs bc mis flatsnap
+all: bfs bc pr cc mis flatsnap
 
 flatsnap: Flatsnap-CPAM
 
@@ -16,6 +16,16 @@ bfs: BFS-CPAM
 
 BFS-CPAM:		BFS.cc
 	g++ -O3 -g -DNDEBUG -DUSE_DIFF_ENCODING -mcx16 -march=native -DHOMEGROWN -pthread -std=c++17 -Wall -I../../../parlaylib/include -I../../../pam/include -I../../../include -I../ -o BFS-CPAM BFS.cc -L/usr/local/lib -ljemalloc
+
+pr: PR-CPAM
+
+PR-CPAM:		PR.cc
+	g++ -O3 -g -DNDEBUG -DUSE_DIFF_ENCODING -mcx16 -march=native -DHOMEGROWN -pthread -std=c++17 -Wall -I../../../parlaylib/include -I../../../pam/include -I../../../include -I../ -o PR-CPAM PR.cc -L/usr/local/lib -ljemalloc
+
+cc: CC-CPAM
+
+CC-CPAM:		CC.cc
+	g++ -O3 -g -DNDEBUG -DUSE_DIFF_ENCODING -mcx16 -march=native -DHOMEGROWN -pthread -std=c++17 -Wall -I../../../parlaylib/include -I../../../pam/include -I../../../include -I../ -o CC-CPAM CC.cc -L/usr/local/lib -ljemalloc
 
 
 mis: MIS-CPAM

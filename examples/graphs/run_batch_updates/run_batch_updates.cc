@@ -44,7 +44,7 @@ double BatchUpdates_runner(Graph& G, cpam::commandLine P) {
 
 
   auto update_times = std::vector<double>();
-  size_t n_trials = 9;
+  size_t n_trials = 10;
   pbbs::random r;
 
 #ifdef USE_PAM_UPPER
@@ -94,11 +94,21 @@ double BatchUpdates_runner(Graph& G, cpam::commandLine P) {
       }
     }
 
-    std::sort(inserts.begin(), inserts.end());
-    std::sort(deletes.begin(), deletes.end());
+    // std::sort(inserts.begin(), inserts.end());
+    double insert_total_time = 0;
+    for (double insert : inserts) {
+      insert_total_time += insert;
+    }
+    double insert_avg_time = insert_total_time/n_trials;
+    // std::sort(deletes.begin(), deletes.end());
+        double delete_total_time = 0;
+    for (double del : deletes) {
+      delete_total_time += del;
+    }
+    double delete_avg_time = delete_total_time/n_trials;
 
-    cout << "RESULT: Insert," << update_sizes[us] << "," << inserts[n_trials/2] << endl;
-    cout << "RESULT: Delete," << update_sizes[us] << "," << deletes[n_trials/2] << endl;
+    cout << "RESULT: Insert," << update_sizes[us] << "," << insert_avg_time << endl;
+    cout << "RESULT: Delete," << update_sizes[us] << "," << delete_avg_time << endl;
   }
   return 1.0;
 }
