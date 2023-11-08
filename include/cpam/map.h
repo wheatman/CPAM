@@ -736,6 +736,9 @@ struct set_full_entry : entry {
   static inline key_t get_key(const entry_t& e) { return e; }
   static inline val_t get_val(const entry_t& e) { return 0; }
   static inline void set_val(entry_t& e, const val_t& v) {}
+  static inline entry_t to_entry(const key_t& k, const val_t& v) {
+    return k;
+  };
 };
 
 template <class _Entry, size_t BlockSize=256, class Encoder=default_entry_encoder, class Balance = weight_balanced_tree>
