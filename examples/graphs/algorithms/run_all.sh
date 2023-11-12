@@ -1,9 +1,12 @@
-
+make -j
 
 ROUNDS=10
 
 function run {
   echo $1
+  echo sizes
+  numactl -i all ./BFS-CPAM -s -rounds 1 -src $2 $1 | grep "size in bytes"
+
   echo "BFS"
   numactl -i all ./BFS-CPAM -s -rounds $ROUNDS -src $2 $1 | grep "time per iter"
 
