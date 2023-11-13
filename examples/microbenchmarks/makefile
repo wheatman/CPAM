@@ -5,16 +5,16 @@ sizes: testParallel-CPAM-NA-1 testParallel-CPAM-NA-2 testParallel-CPAM-NA-4 test
 sizes_diff: testParallel-CPAM-NA-Diff-1 testParallel-CPAM-NA-Diff-2 testParallel-CPAM-NA-Diff-4 testParallel-CPAM-NA-Diff-8 testParallel-CPAM-NA-Diff-16 testParallel-CPAM-NA-Diff-32 testParallel-CPAM-NA-Diff-64 testParallel-CPAM-NA-Diff-128 testParallel-CPAM-NA-Diff-256 testParallel-CPAM-NA-Diff-512 testParallel-CPAM-NA-Diff-1024 testParallel-CPAM-NA-Diff-2048
 
 testParallel-CPAM-NA:		testParallel.cpp
-	g++ -O3 -DNDEBUG -DNO_AUG -DBLOCK_SIZE=128 -mcx16 -march=native -DHOMEGROWN -pthread -std=c++17 -Wall -I../../parlaylib/include -I../../include -o testParallel-CPAM-NA testParallel.cpp -L/usr/local/lib -ljemalloc
+	g++ -O3 -DNDEBUG -DNO_AUG -DBLOCK_SIZE=128 -mcx16 -march=native -DHOMEGROWN -pthread -std=c++17 -Wall -I../../parlaylib/include -I../../include -o testParallel-CPAM-NA testParallel.cpp -L/usr/local/lib -ljemalloc -L`jemalloc-config --libdir` -Wl,-rpath,`jemalloc-config --libdir` -ljemalloc `jemalloc-config --libs`
 
 testParallel-CPAM-NA-Seq:		testParallel.cpp
-	g++ -O3 -DNDEBUG -DPARLAY_SEQUENTIAL -DNO_AUG -DBLOCK_SIZE=128 -mcx16 -march=native -DHOMEGROWN -pthread -std=c++17 -Wall -I../../parlaylib/include -I../../include -o testParallel-CPAM-NA-Seq testParallel.cpp -L/usr/local/lib -ljemalloc
+	g++ -O3 -DNDEBUG -DPARLAY_SEQUENTIAL -DNO_AUG -DBLOCK_SIZE=128 -mcx16 -march=native -DHOMEGROWN -pthread -std=c++17 -Wall -I../../parlaylib/include -I../../include -o testParallel-CPAM-NA-Seq testParallel.cpp -L/usr/local/lib -ljemalloc -L`jemalloc-config --libdir` -Wl,-rpath,`jemalloc-config --libdir` -ljemalloc `jemalloc-config --libs`
 
 testParallel-CPAM-NA-Diff:		testParallel.cpp
-	g++ -DUSE_DIFF_ENCODING -DBLOCK_SIZE=128 -O3 -DNDEBUG -DNO_AUG -mcx16 -march=native -DHOMEGROWN -pthread -std=c++17 -Wall -I../../parlaylib/include -I../../include -o testParallel-CPAM-NA-Diff testParallel.cpp -L/usr/local/lib -ljemalloc
+	g++ -DUSE_DIFF_ENCODING -DBLOCK_SIZE=128 -O3 -DNDEBUG -DNO_AUG -mcx16 -march=native -DHOMEGROWN -pthread -std=c++17 -Wall -I../../parlaylib/include -I../../include -o testParallel-CPAM-NA-Diff testParallel.cpp -L/usr/local/lib -ljemalloc -L`jemalloc-config --libdir` -Wl,-rpath,`jemalloc-config --libdir` -ljemalloc `jemalloc-config --libs`
 
 testParallel-CPAM-NA-Diff-Seq:		testParallel.cpp
-	g++ -DUSE_DIFF_ENCODING -DPARLAY_SEQUENTIAL -DBLOCK_SIZE=128 -O3 -DNDEBUG -DNO_AUG -mcx16 -march=native -DHOMEGROWN -pthread -std=c++17 -Wall -I../../parlaylib/include -I../../include -o testParallel-CPAM-NA-Diff-Seq testParallel.cpp -L/usr/local/lib -ljemalloc
+	g++ -DUSE_DIFF_ENCODING -DPARLAY_SEQUENTIAL -DBLOCK_SIZE=128 -O3 -DNDEBUG -DNO_AUG -mcx16 -march=native -DHOMEGROWN -pthread -std=c++17 -Wall -I../../parlaylib/include -I../../include -o testParallel-CPAM-NA-Diff-Seq testParallel.cpp -L/usr/local/lib -ljemalloc -L`jemalloc-config --libdir` -Wl,-rpath,`jemalloc-config --libdir` -ljemalloc `jemalloc-config --libs`
 
 
 testParallel-CPAM:		testParallel.cpp
@@ -188,7 +188,7 @@ testParallel-CPAM-Diff-2048:		testParallel.cpp
 
 
 testParallel-PAM-NA:		testParallel-PAM.cpp
-	g++ -O3 -DNDEBUG -DNO_AUG -mcx16 -march=native -DHOMEGROWN -pthread -std=c++17 -Wall -I../../parlaylib/include -I../../include -o testParallel-PAM-NA testParallel-PAM.cpp -L/usr/local/lib -ljemalloc
+	g++ -O3 -DNDEBUG -DNO_AUG -mcx16 -march=native -DHOMEGROWN -pthread -std=c++17 -Wall -I../../parlaylib/include -I../../include -o testParallel-PAM-NA testParallel-PAM.cpp -L/usr/local/lib -ljemalloc -L`jemalloc-config --libdir` -Wl,-rpath,`jemalloc-config --libdir` -ljemalloc `jemalloc-config --libs`
 
 testParallel-PAM-NA-Seq:		testParallel-PAM.cpp
 	g++ -O3 -DNDEBUG -DPARLAY_SEQUENTIAL -DNO_AUG -mcx16 -march=native -DHOMEGROWN -pthread -std=c++17 -Wall -I../../parlaylib/include -I../../include -o testParallel-PAM-NA-Seq testParallel-PAM.cpp -L/usr/local/lib -ljemalloc
