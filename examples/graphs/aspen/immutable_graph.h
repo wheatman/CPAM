@@ -341,7 +341,7 @@ struct symmetric_graph {
     };
 
     // Only apply integer sort if it will be work-efficient
-    if (n <= (m * parlay::log2_up(m))) {
+    if (false && n <= (m * parlay::log2_up(m))) {
       parlay::integer_sort_inplace(parlay::make_slice(edges, edges + m),
                                    edge_to_long);
     } else {
@@ -485,6 +485,77 @@ struct symmetric_graph {
       return root;
     };
     V = vertex_tree::multi_insert_sorted_map(std::move(V), elts, combine_op, map_op);
+  }
+
+// m : number of edges
+  // edges: pairs of edges to insert. Currently working with undirected graphs;
+  // assuming that an edge already shows up in both directions
+  // Let the caller delete edges.
+  template <class Edge>
+  SymGraph insert_edges_batch_2(size_t m, Edge* edges,
+                            bool sorted = false, bool remove_dups = false,
+                            size_t nn = std::numeric_limits<size_t>::max(),
+                            bool run_seq = false) {
+    timer pt("Insert", false);
+    timer t("Insert", false);
+    auto E_orig = parlay::make_slice(edges, edges + m);
+    parlay::sequence<Edge> E_alloc;
+
+    sort_updates(edges, m);
+    t.next("insert: sort time");
+    auto E = E_orig;
+
+    if (remove_dups) {
+      // can perform combining here if desired
+      auto bool_seq = parlay::delayed_seq<bool>(E_orig.size(), [&](size_t i) {
+        return (i == 0 || E_orig[i] != E_orig[i - 1]);
+      });
+      E_alloc = parlay::pack(E_orig, bool_seq);
+      m = E_alloc.size();
+      t.next("insert: remove dups time");
+      E = parlay::make_slice(E_alloc);
+    }
+
+    // pack starts
+    auto start_im = parlay::delayed_seq<size_t>(m, [&](size_t i) {
+      return (i == 0 || (get<0>(E[i]) != get<0>(E[i - 1])));
+    });
+    auto I = parlay::pack_index<size_t>(start_im);
+    t.next("insert: Generate starts");
+
+    // At this point have the (key, slice<uintE>) pairs ready to go.
+    // VE = slice<uintE>
+    // apply multi_update_sorted
+
+    auto Vals = parlay::tabulate(E.size(), [&](size_t i) -> ngh_and_weight {
+      return ngh_and_weight(std::get<1>(E[i]), weight());
+    });
+    t.next("insert: Generate vals");
+
+    using key_type = uintE;
+    using value_type = parlay::slice<ngh_and_weight*, ngh_and_weight*>;
+    using KV = std::pair<key_type, value_type>;
+    auto elts = parlay::sequence<KV>::from_function(I.size(), [&] (size_t i) {
+      auto start = I[i];
+      auto end = (i == I.size()-1) ? m : I[i+1];
+      return KV(get<0>(E[start]), parlay::make_slice(Vals.begin() + start, Vals.begin() + end));
+    });
+    t.next("insert: Generate KV-pairs");
+
+    auto replace = [&] (const auto& a, const auto& b) { return b; };
+    auto combine_op = [&] (edge_tree cur, value_type incoming) {
+      return edge_tree::multi_insert_sorted(cur, incoming, replace);
+    };
+    auto map_op = [] (value_type incoming) {
+      auto tree = edge_tree(incoming.begin(), incoming.begin() + incoming.size());
+      auto root = tree.root;
+      tree.root = nullptr;
+      assert(edge_tree::Tree::ref_cnt(root) == 1);
+      return root;
+    };
+    auto new_V = vertex_tree::multi_insert_sorted_map(V, elts, combine_op, map_op);
+
+    return SymGraph(std::move(new_V));
   }
 
   // m : number of edges
