@@ -146,10 +146,10 @@ struct versioned_graph {
         if (cpam::utils::atomic_compare_and_swap(ref_ct_loc, cur_val, cur_val-1)) {
           // no longer possible for new readers to acquire
           if (root) { // might be an empty graph
-            if (Tree::ref_cnt(root) != 1) {
-              std::cout << "Bad ref_cnt when deleting version." << std::endl;
-              exit(0);
-            }
+//            if (Tree::ref_cnt(root) != 1) {
+//              std::cout << "Bad ref_cnt when deleting version. Ref cnt = " << Tree::ref_cnt(root) << std::endl;
+//              exit(0);
+//            }
             Node_GC::decrement_recursive(root);
           }
 
@@ -180,7 +180,6 @@ struct versioned_graph {
     G_next.clear_root();
     // 2. Make the new version visible
     cpam::utils::fetch_and_add(&current_timestamp, 1);
-
     release_version(std::move(S));
   }
 
@@ -204,6 +203,17 @@ struct versioned_graph {
     cpam::utils::fetch_and_add(&current_timestamp, 1);
 
     release_version(std::move(S));
+  }
+
+  void add_version_from_graph(snapshot_graph G_next){
+    live_versions.insert(std::make_tuple(current_timestamp,
+                                    std::make_tuple(refct_utils::make_refct(current_timestamp, 1),
+                                               G_next.get_root())));
+    G_next.clear_root();
+    
+    std::cout << "New version released with timestamp " << current_timestamp << std::endl;
+    // 2. Make the new version visible
+    cpam::utils::fetch_and_add(&current_timestamp, 1);
   }
 
 

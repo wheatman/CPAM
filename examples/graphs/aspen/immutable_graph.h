@@ -29,12 +29,12 @@ struct symmetric_graph {
 
   struct vertex_entry {
     using key_t = vertex_id;
-    using val_t = edge_node*;
+    using val_t = edge_tree;
     using aug_t = std::pair<vertex_id, edge_id>;
     static inline bool comp(key_t a, key_t b) { return a < b; }
     static aug_t get_empty() { return std::make_pair(0, 0); }
     static aug_t from_entry(const key_t& k, const val_t& v) {
-      return std::make_pair(k, edge_tree::Tree::size(v));
+      return std::make_pair(k, v.size());
     }
     static aug_t combine(aug_t a, aug_t b) {
       auto& [a_v, a_e] = a;
@@ -221,7 +221,7 @@ struct symmetric_graph {
       const auto& in_opt = *opt;
       // auto ref_cnt = edge_tree::Tree::ref_cnt(in_opt);
       // assert(ref_cnt == 1);
-      return vertex(v, in_opt);
+      return vertex(v, in_opt.root);
     }
     return vertex(v, nullptr);
   }
@@ -231,7 +231,7 @@ struct symmetric_graph {
     using entry_t = typename vertex_entry::entry_t;
     auto map_f = [&](const entry_t& vtx_entry, size_t i) {
       const vertex_id& v = std::get<0>(vtx_entry);
-      auto vtx = vertex(v, std::get<1>(vtx_entry));
+      auto vtx = vertex(v, std::get<1>(vtx_entry).root);
       f(vtx);
     };
     vertex_tree::foreach_index(V, map_f, 0, 1);
@@ -358,7 +358,7 @@ struct symmetric_graph {
   // m : number of edges
   // edges: pairs of edges to insert. Currently working with undirected graphs;
   template <class VtxEntry>
-  void insert_vertices_batch(size_t m, VtxEntry* E, bool functional = false) {
+  void insert_vertices_batch(size_t m, VtxEntry* E) {
     timer pt("Insert", false);
     timer t("Insert", false);
     auto E_slice = parlay::make_slice(E, E + m);
@@ -367,118 +367,51 @@ struct symmetric_graph {
     };
     parlay::sort_inplace(E_slice, key_less);
 
-    auto combine_op = [&] (edge_node* cur, edge_node* inc) {
-      edge_tree t;
-      t.root = cur;  // Lets the ref-cnt get decremented here.
+    auto combine_op = [&] (edge_tree cur, edge_tree inc) {
+      // Let cur get decremented here.
       return inc;
     };
-    if(functional) V = vertex_tree::multi_insert_sorted(V, E_slice, combine_op);
-    else V = vertex_tree::multi_insert_sorted(std::move(V), E_slice, combine_op);
+    V = vertex_tree::multi_insert_sorted(std::move(V), E_slice, combine_op);
+  }
+
+  template <class VtxEntry>
+  SymGraph insert_vertices_batch_functional(size_t m, VtxEntry* E) {
+    timer pt("Insert", false);
+    timer t("Insert", false);
+    auto E_slice = parlay::make_slice(E, E + m);
+    auto key_less = [&] (const VtxEntry& l, const VtxEntry& r) {
+      return std::get<0>(l) < std::get<0>(r);
+    };
+    parlay::sort_inplace(E_slice, key_less);
+
+    auto combine_op = [&] (edge_tree cur, edge_tree inc) {
+      // Let cur get decremented here.
+      return inc;
+    };
+    std::cout << "Multiinsert size: " << E_slice.size() << std::endl;
+    auto new_V = vertex_tree::multi_insert_sorted(V, E_slice, combine_op);
+    return SymGraph(std::move(new_V));
   }
 
   // m : number of vertices to delete
   // D : array of the deleted vertex ids
-  void delete_vertices_batch(size_t m, vertex_id* D, bool functional = false) {
+  void delete_vertices_batch(size_t m, vertex_id* D) {
     timer pt("Insert", false);
     timer t("Insert", false);
     auto D_slice = parlay::make_slice(D, D + m);
     auto key_less = std::less<vertex_id>();
     parlay::sort_inplace(D_slice, key_less);
-    if(functional) V = vertex_tree::multi_delete_sorted(V, D_slice);
-    else V = vertex_tree::multi_delete_sorted(std::move(V), D_slice);
+    V = vertex_tree::multi_delete_sorted(std::move(V), D_slice);
   }
 
-  // Trying different versions of batch insert:
-  // (1) insert_edges_batch_1:
-  //
-
-  // m : number of edges
-  // edges: pairs of edges to insert. Currently working with undirected graphs;
-  // assuming that an edge already shows up in both directions
-  // Let the caller delete edges.
-  template <class Edge>
-  void insert_edges_batch_1(size_t m, Edge* edges, bool sorted = false,
-                            bool remove_dups = false,
-                            size_t nn = std::numeric_limits<size_t>::max(),
-                            bool run_seq = false) {
-    // sort edges by their endpoint
-    timer t;
-    t.start();
-    auto E_orig = parlay::make_slice(edges, edges + m);
-    parlay::sequence<Edge> E_alloc;
-    if (!sorted) {
-      sort_updates(edges, m);
-      t.next("sort time");
-    }
-
-    if (remove_dups) {
-      // can perform combining here if desired
-      auto bool_seq = parlay::delayed_seq<bool>(E_orig.size(), [&](size_t i) {
-        return (i == 0 || E_orig[i] != E_orig[i - 1]);
-      });
-      E_alloc = parlay::pack(E_orig, bool_seq);
-      m = E_alloc.size();
-    }
-
-    auto E = (remove_dups) ? parlay::make_slice(E_alloc) : E_orig;
-
-    // pack starts
-    auto start_im = parlay::delayed_seq<size_t>(m, [&](size_t i) {
-      return (i == 0 || (get<0>(E[i]) != get<0>(E[i - 1])));
-    });
-    auto starts = parlay::pack_index<size_t>(start_im);
-    size_t num_starts = starts.size();
-
-// build new vertices for each start
-#ifdef USE_PAM_UPPER
-    using KV = std::pair<uintE, edge_node*>;
-#else
-    using KV = std::tuple<uintE, edge_node*>;
-#endif
-
-    constexpr const size_t stack_size = 20;
-    KV kv_stack[stack_size];
-    KV* new_verts = kv_stack;
-    if (num_starts > stack_size) {
-      new_verts = cpam::utils::new_array_no_init<KV>(num_starts);
-    }
-
-    auto Vals = parlay::tabulate(E.size(), [&](size_t i) -> ngh_and_weight {
-      return ngh_and_weight(std::get<1>(E[i]), weight());
-    });
-    t.next("prepare time");
-
-    parlay::parallel_for(
-        0, num_starts,
-        [&](size_t i) {
-          size_t off = starts[i];
-          size_t deg = ((i == (num_starts - 1)) ? m : starts[i + 1]) - off;
-          uintE v = std::get<0>(E[starts[i]]);
-
-          auto tree = edge_tree(Vals.begin() + off, Vals.begin() + off + deg);
-          new_verts[i] = {v, tree.root};
-          tree.root = nullptr;
-        },
-        1);
-    t.next("build vertices time");
-
-    auto replace = [&](edge_node* prev_tree, edge_node* new_tree) {
-      auto t1 = edge_tree();
-      t1.root = prev_tree;
-      auto t2 = edge_tree();
-      t2.root = new_tree;
-      if (t1.root) assert(t1.ref_cnt() == 1);
-      if (t2.root) assert(t2.ref_cnt() == 1);
-      auto t3 = edge_tree::map_union(std::move(t1), std::move(t2));
-      assert(t3.ref_cnt() == 1);
-      edge_node* ret = t3.root;
-      t3.root = nullptr;
-      return ret;
-    };
-
-    auto new_verts_seq = parlay::make_slice(new_verts, new_verts + num_starts);
-    V = vertex_tree::multi_insert_sorted(std::move(V), new_verts_seq, replace);
-    t.next("multiinsert time");
+  SymGraph delete_vertices_batch_functional(size_t m, vertex_id* D) {
+    timer pt("Insert", false);
+    timer t("Insert", false);
+    auto D_slice = parlay::make_slice(D, D + m);
+    auto key_less = std::less<vertex_id>();
+    parlay::sort_inplace(D_slice, key_less);
+    auto new_V = vertex_tree::multi_delete_sorted(V, D_slice);
+    return SymGraph(std::move(new_V));
   }
 
   template <class Func>
@@ -486,92 +419,12 @@ struct symmetric_graph {
     V.iterate_seq(f);
   }
 
-
   // m : number of edges
   // edges: pairs of edges to insert. Currently working with undirected graphs;
   // assuming that an edge already shows up in both directions
   // Let the caller delete edges.
   template <class Edge>
-  SymGraph insert_edges_batch_2(size_t m, Edge* edges,
-                            bool sorted = false, bool remove_dups = false,
-                            size_t nn = std::numeric_limits<size_t>::max(),
-                            bool run_seq = false) {
-    timer pt("Insert", false);
-    timer t("Insert", false);
-    auto E_orig = parlay::make_slice(edges, edges + m);
-    parlay::sequence<Edge> E_alloc;
-
-    sort_updates(edges, m);
-    t.next("insert: sort time");
-    auto E = E_orig;
-
-    if (remove_dups) {
-      // can perform combining here if desired
-      auto bool_seq = parlay::delayed_seq<bool>(E_orig.size(), [&](size_t i) {
-        return (i == 0 || E_orig[i] != E_orig[i - 1]);
-      });
-      E_alloc = parlay::pack(E_orig, bool_seq);
-      m = E_alloc.size();
-      t.next("insert: remove dups time");
-      E = parlay::make_slice(E_alloc);
-    }
-
-    // pack starts
-    auto start_im = parlay::delayed_seq<size_t>(m, [&](size_t i) {
-      return (i == 0 || (get<0>(E[i]) != get<0>(E[i - 1])));
-    });
-    auto I = parlay::pack_index<size_t>(start_im);
-    t.next("insert: Generate starts");
-
-    // At this point have the (key, slice<uintE>) pairs ready to go.
-    // VE = slice<uintE>
-    // apply multi_update_sorted
-
-    auto Vals = parlay::tabulate(E.size(), [&](size_t i) -> ngh_and_weight {
-      return ngh_and_weight(std::get<1>(E[i]), weight());
-    });
-    t.next("insert: Generate vals");
-
-    using key_type = uintE;
-    using value_type = parlay::slice<ngh_and_weight*, ngh_and_weight*>;
-    using KV = std::pair<key_type, value_type>;
-    auto elts = parlay::sequence<KV>::from_function(I.size(), [&] (size_t i) {
-      auto start = I[i];
-      auto end = (i == I.size()-1) ? m : I[i+1];
-      return KV(get<0>(E[start]), parlay::make_slice(Vals.begin() + start, Vals.begin() + end));
-    });
-    t.next("insert: Generate KV-pairs");
-
-    auto replace = [&] (const auto& a, const auto& b) { return b; };
-    auto combine_op = [&] (edge_node* cur, value_type incoming) {
-      edge_tree t;
-      t.root = cur;
-      auto ret = edge_tree::multi_insert_sorted(t, incoming, replace);
-      t.root = nullptr;
-
-      auto r = ret.root;
-      ret.root = nullptr;
-      assert(edge_tree::Tree::ref_cnt(r) == 1);
-      return r;
-    };
-    auto map_op = [] (value_type incoming) {
-      auto tree = edge_tree(incoming.begin(), incoming.begin() + incoming.size());
-      auto root = tree.root;
-      tree.root = nullptr;
-      assert(edge_tree::Tree::ref_cnt(root) == 1);
-      return root;
-    };
-    auto new_V = vertex_tree::multi_insert_sorted_map(V, elts, combine_op, map_op);
-
-    return SymGraph(std::move(new_V));
-  }
-
-  // m : number of edges
-  // edges: pairs of edges to insert. Currently working with undirected graphs;
-  // assuming that an edge already shows up in both directions
-  // Let the caller delete edges.
-  template <class Edge>
-  void insert_edges_batch_3(size_t m, Edge* edges,
+  void insert_edges_batch(size_t m, Edge* edges,
                             bool sorted = false, bool remove_dups = false,
                             size_t nn = std::numeric_limits<size_t>::max(),
                             bool run_seq = false) {
@@ -621,14 +474,8 @@ struct symmetric_graph {
     t.next("insert: Generate KV-pairs");
 
     auto replace = [&] (const auto& a, const auto& b) { return b; };
-    auto combine_op = [&] (edge_node* cur, value_type incoming) {
-      edge_tree t;
-      t.root = cur;
-      auto ret = edge_tree::multi_insert_sorted(std::move(t), incoming, replace);
-      auto r = ret.root;
-      ret.root = nullptr;
-      assert(edge_tree::Tree::ref_cnt(r) == 1);
-      return r;
+    auto combine_op = [&] (edge_tree cur, value_type incoming) {
+      return edge_tree::multi_insert_sorted(std::move(cur), incoming, replace);
     };
     auto map_op = [] (value_type incoming) {
       auto tree = edge_tree(incoming.begin(), incoming.begin() + incoming.size());
@@ -641,165 +488,11 @@ struct symmetric_graph {
   }
 
   // m : number of edges
-  // edges: pairs of edges to delete. Currently working with undirected graphs;
-  // assuming that an edge already shows up in both directions
-  // Let the caller delete edges.
-  template <class Edge>
-  SymGraph delete_edges_batch_1(size_t m, Edge* edges, bool sorted = false,
-                            bool remove_dups = false,
-                            size_t nn = std::numeric_limits<size_t>::max(),
-                            bool run_seq = false) {
-    // sort edges by their endpoint
-    auto E_orig = parlay::make_slice(edges, edges + m);
-    parlay::sequence<Edge> E_alloc;
-    if (!sorted) {
-      sort_updates(edges, m);
-    }
-
-    if (remove_dups) {
-      // can perform combining here if desired
-      auto bool_seq = parlay::delayed_seq<bool>(E_orig.size(), [&](size_t i) {
-        return (i == 0 || E_orig[i] != E_orig[i - 1]);
-      });
-      E_alloc = parlay::pack(E_orig, bool_seq);
-      m = E_alloc.size();
-    }
-
-    auto E = (remove_dups) ? parlay::make_slice(E_alloc) : E_orig;
-
-    // pack starts
-    auto start_im = parlay::delayed_seq<size_t>(m, [&](size_t i) {
-      return (i == 0 || (get<0>(E[i]) != get<0>(E[i - 1])));
-    });
-    auto starts = parlay::pack_index<size_t>(start_im);
-    size_t num_starts = starts.size();
-
-// build new vertices for each start
-#ifdef USE_PAM_UPPER
-    using KV = std::pair<uintE, edge_node*>;
-#else
-    using KV = std::tuple<uintE, edge_node*>;
-#endif
-
-    constexpr const size_t stack_size = 20;
-    KV kv_stack[stack_size];
-    KV* new_verts = kv_stack;
-    if (num_starts > stack_size) {
-      new_verts = cpam::utils::new_array_no_init<KV>(num_starts);
-    }
-
-    auto Vals = parlay::tabulate(E.size(), [&](size_t i) -> ngh_and_weight {
-      return ngh_and_weight(std::get<1>(E[i]), weight());
-    });
-
-    parlay::parallel_for(
-        0, num_starts,
-        [&](size_t i) {
-          size_t off = starts[i];
-          size_t deg = ((i == (num_starts - 1)) ? m : starts[i + 1]) - off;
-          uintE v = std::get<0>(E[starts[i]]);
-
-          auto tree = edge_tree(Vals.begin() + off, Vals.begin() + off + deg);
-          new_verts[i] = {v, tree.root};
-          tree.root = nullptr;
-        },
-        1);
-
-    auto replace = [&](edge_node* prev_tree, edge_node* new_tree) {
-      auto t1 = edge_tree();
-      t1.root = prev_tree;
-      auto t2 = edge_tree();
-      t2.root = new_tree;
-      auto t3 = edge_tree::map_difference(std::move(t1), std::move(t2));
-      edge_node* ret = t3.root;
-      t3.root = nullptr;
-      return ret;
-    };
-
-    auto new_verts_seq = parlay::make_slice(new_verts, new_verts + num_starts);
-    V = vertex_tree::multi_insert_sorted(std::move(V), new_verts_seq, replace);
-    return SymGraph(std::move(V));
-  }
-
-  // m : number of edges
   // edges: pairs of edges to insert. Currently working with undirected graphs;
   // assuming that an edge already shows up in both directions
   // Let the caller delete edges.
   template <class Edge>
-  SymGraph delete_edges_batch_2(size_t m, Edge* edges,
-                            bool sorted = false, bool remove_dups = false,
-                            size_t nn = std::numeric_limits<size_t>::max(),
-                            bool run_seq = false) {
-    // sort edges by their endpoint
-    timer t("Delete", false);
-    auto E_orig = parlay::make_slice(edges, edges + m);
-    parlay::sequence<Edge> E_alloc;
-
-    sort_updates(edges, m);
-    t.next("delete: sort time");
-
-    if (remove_dups) {
-      // can perform combining here if desired
-      auto bool_seq = parlay::delayed_seq<bool>(E_orig.size(), [&](size_t i) {
-        return (i == 0 || E_orig[i] != E_orig[i - 1]);
-      });
-      E_alloc = parlay::pack(E_orig, bool_seq);
-      m = E_alloc.size();
-      t.next("delete: remove dups time");
-    }
-    auto E = (remove_dups) ? parlay::make_slice(E_alloc) : E_orig;
-
-    // pack starts
-    auto start_im = parlay::delayed_seq<size_t>(m, [&](size_t i) {
-      return (i == 0 || (get<0>(E[i]) != get<0>(E[i - 1])));
-    });
-    auto I = parlay::pack_index<size_t>(start_im);
-    t.next("delete: Generate starts");
-
-    // At this point have the (key, slice<uintE>) pairs ready to go.
-    // VE = slice<uintE>
-    // apply multi_update_sorted
-
-    auto Vals = parlay::tabulate(E.size(), [&](size_t i) -> uintE {
-      return std::get<1>(E[i]);
-    });
-    t.next("delete: Generate vals");
-
-    using key_type = uintE;
-    using value_type = parlay::slice<uintE*, uintE*>;
-    using KV = std::pair<key_type, value_type>;
-    auto elts = parlay::sequence<KV>::from_function(I.size(), [&] (size_t i) {
-      auto start = I[i];
-      auto end = (i == I.size()-1) ? m : I[i+1];
-      auto size = end - start;
-      return KV(get<0>(E[start]), parlay::make_slice(Vals.begin() + start, Vals.begin() + end));
-    });
-    t.next("delete: Generate KV-pairs");
-
-    auto combine_op = [&] (edge_node* cur, value_type incoming) {
-      assert(edge_tree::Tree::ref_cnt(cur) == 1);
-      edge_tree t;
-      t.root = cur;
-      auto ret = edge_tree::multi_delete_sorted(std::move(t), incoming);
-      auto r = ret.root;
-      ret.root = nullptr;
-      assert((r == nullptr) || (edge_tree::Tree::ref_cnt(r) == 1));
-      return r;
-    };
-    auto new_V = vertex_tree::multi_delete_sorted_map(V, elts, combine_op);
-
-    t.next("delete: multiinsert time");
-
-    return SymGraph(std::move(new_V));
-  }
-
-
-  // m : number of edges
-  // edges: pairs of edges to insert. Currently working with undirected graphs;
-  // assuming that an edge already shows up in both directions
-  // Let the caller delete edges.
-  template <class Edge>
-  void delete_edges_batch_3(size_t m, Edge* edges,
+  void delete_edges_batch(size_t m, Edge* edges,
                             bool sorted = false, bool remove_dups = false,
                             size_t nn = std::numeric_limits<size_t>::max(),
                             bool run_seq = false) {
@@ -844,15 +537,8 @@ struct symmetric_graph {
     });
     t.next("delete: Generate KV-pairs");
 
-    auto combine_op = [&] (edge_node* cur, value_type incoming) {
-      assert(edge_tree::Tree::ref_cnt(cur) == 1);
-      edge_tree t;
-      t.root = cur;
-      auto ret = edge_tree::multi_delete_sorted(std::move(t), incoming);
-      auto r = ret.root;
-      ret.root = nullptr;
-      assert((r == nullptr) || (edge_tree::Tree::ref_cnt(r) == 1));
-      return r;
+    auto combine_op = [&] (edge_tree cur, value_type incoming) {
+      return edge_tree::multi_delete_sorted(std::move(cur), incoming);
     };
     V = vertex_tree::multi_delete_sorted_map(std::move(V), elts, combine_op);
 
@@ -879,7 +565,7 @@ struct symmetric_graph {
       return e.first != UINT_E_MAX;
     });
 
-    auto combine_op = [&] (edge_node* cur, value_type incoming) {
+    auto combine_op = [&] (edge_tree cur, value_type incoming) {
       std::cout << "Unexpected call to combine, quitting." << std::endl;
       exit(-1);
       return nullptr;
