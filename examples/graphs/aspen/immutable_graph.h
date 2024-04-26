@@ -278,8 +278,8 @@ struct symmetric_graph {
         [&](const auto& et) -> std::tuple<size_t, size_t, size_t, size_t> {
       auto[key, root] = et;
       if (root != nullptr) {
-        edge_tree tree;
-        tree.root = root;
+        edge_tree tree(root);
+        // tree.root = root;
         auto sz = tree.size_in_bytes(noop);
         auto[internal, leafs, leaf_sizes] = tree.node_stats();
         tree.root = nullptr;
@@ -301,7 +301,7 @@ struct symmetric_graph {
               << std::endl;
 
     size_t total_bytes = edge_tree_bytes + vertex_tree_bytes;
-    size_t m = num_edges();
+    // size_t m = num_edges();
 
     std::cout << "csv: " << graphname << "," << num_vertices() << "," << num_edges() << "," << mode
               << "," << total_bytes << "," << vertex_tree_bytes << ","
