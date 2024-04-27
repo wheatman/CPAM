@@ -220,7 +220,7 @@ auto filter_edges(
                             return std::nullopt;
                           }
                         });
-  return std::make_pair(inserts, deletes);
+  return std::make_tuple(inserts, deletes, std::get<0>(edges[0].second));
 }
 
 auto group_edges_by_timestamp(
@@ -231,6 +231,10 @@ auto group_edges_by_timestamp(
       std::pair<std::tuple<uint32_t, uint32_t>, std::tuple<uint32_t, bool>>>>
       sequences(1);
   size_t current_timestamp = 0;
+  if (!edges.empty()) {
+    auto [src, dest, ts, insert] = edges[0];
+    current_timestamp = ts - (ts % time_steps_to_group);
+  }
   for (const auto &edge : edges) {
     auto [src, dest, ts, insert] = edge;
     if (ts >= current_timestamp + time_steps_to_group) {
@@ -313,10 +317,11 @@ public:
 
 size_t get_size_of_groups(
     const parlay::sequence<
-        std::pair<parlay::sequence<std::tuple<uint32_t, uint32_t>>,
-                  parlay::sequence<std::tuple<uint32_t, uint32_t>>>> &groups) {
+        std::tuple<parlay::sequence<std::tuple<uint32_t, uint32_t>>,
+                   parlay::sequence<std::tuple<uint32_t, uint32_t>>, uint32_t>>
+        &groups) {
   return parlay::reduce(parlay::delayed_map(groups, [](auto &elem) {
-    auto &[inserts, deletes] = elem;
+    auto &[inserts, deletes, start_time] = elem;
     size_t insert_size =
         16 + (inserts.capacity() * sizeof(std::tuple<uint32_t, uint32_t>));
     size_t delete_size =
@@ -327,10 +332,11 @@ size_t get_size_of_groups(
 
 size_t get_count_of_groups(
     const parlay::sequence<
-        std::pair<parlay::sequence<std::tuple<uint32_t, uint32_t>>,
-                  parlay::sequence<std::tuple<uint32_t, uint32_t>>>> &groups) {
+        std::tuple<parlay::sequence<std::tuple<uint32_t, uint32_t>>,
+                   parlay::sequence<std::tuple<uint32_t, uint32_t>>, uint32_t>>
+        &groups) {
   return parlay::reduce(parlay::delayed_map(groups, [](auto &elem) {
-    auto &[inserts, deletes] = elem;
+    auto &[inserts, deletes, start_time] = elem;
     return inserts.size() + deletes.size();
   }));
 }
@@ -356,12 +362,12 @@ public:
   simple_graph(uint32_t num_nodes) : nodes(num_nodes) {}
   void add_edge(uint32_t src, uint32_t dest) { nodes[src].insert(dest); }
   void remove_edge(uint32_t src, uint32_t dest) { nodes[src].erase(dest); }
-  void insert_edge_batch(const auto &edges) {
+  template <class T> void insert_edge_batch(const T &edges) {
     for (const auto &edge : edges) {
       add_edge(std::get<0>(edge), std::get<1>(edge));
     }
   }
-  void remove_edge_batch(const auto &edges) {
+  template <class T> void remove_edge_batch(const T &edges) {
     for (const auto &edge : edges) {
       remove_edge(std::get<0>(edge), std::get<1>(edge));
     }
@@ -377,6 +383,20 @@ public:
   }
 };
 
+uint32_t round_ts(uint32_t ts, uint32_t group_size) {
+  return ts - (ts % group_size) + group_size;
+}
+
+template <class T> size_t count_unique_edges(const T &edges) {
+  return parlay::unique(parlay::sort(parlay::delayed_map(
+                            edges,
+                            [](auto &edge) {
+                              return std::make_tuple(std::get<0>(edge),
+                                                     std::get<1>(edge));
+                            })))
+      .size();
+}
+
 void test_building_in_groups(long max_edges, long group_size, std::string fname,
                              bool verify) {
   uint64_t edge_count;
@@ -387,14 +407,31 @@ void test_building_in_groups(long max_edges, long group_size, std::string fname,
   //     std::cout << std::get<0>(edge) << ", " << std::get<1>(edge) << ", "
   //               << std::get<2>(edge) << ", " << std::get<3>(edge) << "\n";
   //   }
+  size_t unique_edges = count_unique_edges(edges);
+
+  std::cout << unique_edges << " unique edges\n";
   auto groups = group_edges_by_timestamp(edges, group_size);
   size_t size_of_groups = get_size_of_groups(groups);
   std::cout << "size of groups is " << size_of_groups << " count of groups is "
             << get_count_of_groups(groups) << "\n";
   edges.clear();
 
-  auto G = build_base_graph(node_count, edge_count / 10, groups[0].first);
+  auto G =
+      build_base_graph(node_count, edge_count / 10, std::get<0>(groups[0]));
 
+  size_t total_updates = std::get<0>(groups[0]).size();
+  if (std::get<1>(groups[0]).size()) {
+    G.delete_edges_batch_inplace(std::get<1>(groups[0]).size(),
+                                 std::get<1>(groups[0]).data());
+    total_updates += std::get<1>(groups[0]).size();
+  }
+  {
+    auto [used, unused] = parlay::internal::memory_usage();
+    std::cout << group_size << ", "
+              << round_ts(std::get<2>(groups[0]), group_size) << ", "
+              << total_updates << ", " << G.num_edges() << ", "
+              << used - get_size_of_groups(groups) << "\n";
+  }
   std::vector<aspen::traversable_graph<aspen::symmetric_graph<aspen::empty>>>
       graph_stack;
   graph_stack.push_back(G);
@@ -406,26 +443,40 @@ void test_building_in_groups(long max_edges, long group_size, std::string fname,
   //     std::cout << std::get<0>(edge) << ", " << std::get<1>(edge) << "\n";
   //   }
   size_t print_frequency = 1;
-  if (groups.size() > 10) {
-    print_frequency = groups.size() / 10;
+  if (groups.size() > 500) {
+    print_frequency = groups.size() / 500;
   }
   for (size_t gi = 1; gi < groups.size(); gi += 1) {
+    total_updates +=
+        std::get<0>(groups[gi]).size() + std::get<1>(groups[gi]).size();
+
+    // std::cout << "num inserts = " << std::get<0>(groups[gi]).size()
+    //           << " num unique inserts = "
+    //           << count_unique_edges(std::get<0>(groups[gi])) << "\n";
+
+    // std::cout << "num deletes = " << std::get<1>(groups[gi]).size()
+    //           << " num unique deletes = "
+    //           << count_unique_edges(std::get<1>(groups[gi])) << "\n";
     // std::cout << "edges being added\n";
     // for (auto &edge : groups[gi].first) {
-    //   std::cout << std::get<0>(edge) << ", " << std::get<1>(edge) << "\n";
+    //   std::cout << std::get<0>(edge) << ", " <<
+    //   std::get<1>(edge) << "\n";
     // }
     // std::cout << "edges being removed\n";
     // for (auto &edge : groups[gi].second) {
-    //   std::cout << std::get<0>(edge) << ", " << std::get<1>(edge) << "\n";
+    //   std::cout << std::get<0>(edge) << ", " <<
+    //   std::get<1>(edge) << "\n";
     // }
-    auto g2 = graph_stack.back().insert_edges_batch(groups[gi].first.size(),
-                                                    groups[gi].first.data());
-    g2.delete_edges_batch_inplace(groups[gi].second.size(),
-                                  groups[gi].second.data());
+    auto g2 = graph_stack.back().insert_edges_batch(
+        std::get<0>(groups[gi]).size(), std::get<0>(groups[gi]).data());
+    g2.delete_edges_batch_inplace(std::get<1>(groups[gi]).size(),
+                                  std::get<1>(groups[gi]).data());
     graph_stack.push_back(g2);
-    auto [used, unused] = parlay::internal::memory_usage();
-    if (gi % print_frequency == 0) {
-      std::cout << gi << ", " << g2.num_edges() << ", "
+    if (gi % print_frequency == 0 || gi == groups.size() - 1) {
+      auto [used, unused] = parlay::internal::memory_usage();
+      std::cout << group_size << ", "
+                << round_ts(std::get<2>(groups[gi]), group_size) << ", "
+                << total_updates << ", " << g2.num_edges() << ", "
                 << used - get_size_of_groups(groups) << "\n";
     }
     // std::cout << "edges in test\n";
@@ -433,9 +484,6 @@ void test_building_in_groups(long max_edges, long group_size, std::string fname,
     //   std::cout << std::get<0>(edge) << ", " << std::get<1>(edge) << "\n";
     // }
   }
-  auto [used, unused] = parlay::internal::memory_usage();
-  std::cout << groups.size() << ", " << graph_stack.back().num_edges() << ", "
-            << used - get_size_of_groups(groups) << "\n";
 
   std::cout << "sanity check, printing out the tree stats for the last tree\n";
   graph_stack.back().get_tree_sizes("", "");
@@ -443,13 +491,13 @@ void test_building_in_groups(long max_edges, long group_size, std::string fname,
   if (verify) {
     simple_graph verify_graph(node_count);
     for (size_t gi = 0; gi < groups.size(); gi += 1) {
-      verify_graph.insert_edge_batch(groups[gi].first);
-      verify_graph.remove_edge_batch(groups[gi].second);
+      verify_graph.insert_edge_batch(std::get<0>(groups[gi]));
+      verify_graph.remove_edge_batch(std::get<1>(groups[gi]));
       if (verify_graph.get_edges() != get_edges(graph_stack[gi])) {
         std::cerr << "edges do not match after group " << gi << "\n";
         return;
       }
-      if (gi % 1000 == 0) {
+      if (gi % print_frequency == 0) {
         std::cout << "verified " << gi << " graphs\n";
       }
     }
