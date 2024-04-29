@@ -403,10 +403,7 @@ void test_building_in_groups(long max_edges, long group_size, std::string fname,
   uint32_t node_count;
   auto edges = get_edges_from_file_bin_ts_with_remove(
       fname, &edge_count, &node_count, true, max_edges);
-  //   for (auto &edge : edges) {
-  //     std::cout << std::get<0>(edge) << ", " << std::get<1>(edge) << ", "
-  //               << std::get<2>(edge) << ", " << std::get<3>(edge) << "\n";
-  //   }
+
   size_t unique_edges = count_unique_edges(edges);
 
   std::cout << unique_edges << " unique edges\n";
@@ -436,37 +433,16 @@ void test_building_in_groups(long max_edges, long group_size, std::string fname,
       graph_stack;
   graph_stack.push_back(G);
 
-  //   auto base_edges = get_edges(G);
-
-  //   std::cout << "base edges\n";
-  //   for (auto &edge : base_edges) {
-  //     std::cout << std::get<0>(edge) << ", " << std::get<1>(edge) << "\n";
-  //   }
   size_t print_frequency = 1;
   if (groups.size() > 500) {
     print_frequency = groups.size() / 500;
   }
+  timer insert_timer;
+  insert_timer.start();
   for (size_t gi = 1; gi < groups.size(); gi += 1) {
     total_updates +=
         std::get<0>(groups[gi]).size() + std::get<1>(groups[gi]).size();
 
-    // std::cout << "num inserts = " << std::get<0>(groups[gi]).size()
-    //           << " num unique inserts = "
-    //           << count_unique_edges(std::get<0>(groups[gi])) << "\n";
-
-    // std::cout << "num deletes = " << std::get<1>(groups[gi]).size()
-    //           << " num unique deletes = "
-    //           << count_unique_edges(std::get<1>(groups[gi])) << "\n";
-    // std::cout << "edges being added\n";
-    // for (auto &edge : groups[gi].first) {
-    //   std::cout << std::get<0>(edge) << ", " <<
-    //   std::get<1>(edge) << "\n";
-    // }
-    // std::cout << "edges being removed\n";
-    // for (auto &edge : groups[gi].second) {
-    //   std::cout << std::get<0>(edge) << ", " <<
-    //   std::get<1>(edge) << "\n";
-    // }
     auto g2 = graph_stack.back().insert_edges_batch(
         std::get<0>(groups[gi]).size(), std::get<0>(groups[gi]).data());
     g2.delete_edges_batch_inplace(std::get<1>(groups[gi]).size(),
@@ -477,12 +453,9 @@ void test_building_in_groups(long max_edges, long group_size, std::string fname,
       std::cout << group_size << ", "
                 << round_ts(std::get<2>(groups[gi]), group_size) << ", "
                 << total_updates << ", " << g2.num_edges() << ", "
-                << used - get_size_of_groups(groups) << "\n";
+                << used - get_size_of_groups(groups) << ", "
+                << total_updates / insert_timer.get_total() << "\n";
     }
-    // std::cout << "edges in test\n";
-    // for (auto &edge : get_edges(G)) {
-    //   std::cout << std::get<0>(edge) << ", " << std::get<1>(edge) << "\n";
-    // }
   }
 
   std::cout << "sanity check, printing out the tree stats for the last tree\n";
