@@ -248,7 +248,7 @@ auto group_edges_by_timestamp(
 }
 
 inline auto
-build_base_graph(uint32_t num_nodes, uint64_t num_edges,
+build_base_graph(uint32_t num_nodes,
                  parlay::sequence<std::tuple<uint32_t, uint32_t>> &edges) {
   using W = aspen::empty;
   using inner_graph = aspen::symmetric_graph<W>;
@@ -256,7 +256,7 @@ build_base_graph(uint32_t num_nodes, uint64_t num_edges,
   timer build_t;
   build_t.start();
   inner_graph ig;
-  ig.reserve(num_nodes, num_edges);
+  ig.reserve(num_nodes, edges.size());
   ig = ig.insert_edges_batch_2(edges.size(), edges.data());
   auto G = outer_graph(std::move(ig));
   build_t.stop();
@@ -413,8 +413,7 @@ void test_building_in_groups(long max_edges, long group_size, std::string fname,
             << get_count_of_groups(groups) << "\n";
   edges.clear();
 
-  auto G =
-      build_base_graph(node_count, edge_count / 10, std::get<0>(groups[0]));
+  auto G = build_base_graph(node_count, std::get<0>(groups[0]));
 
   size_t total_updates = std::get<0>(groups[0]).size();
   if (std::get<1>(groups[0]).size()) {
@@ -477,6 +476,62 @@ void test_building_in_groups(long max_edges, long group_size, std::string fname,
   }
 }
 
+template <class range> auto get_inserts_and_deletes(const range &slice) {
+  return std::make_pair(
+      parlay::map_maybe(slice,
+                        [](const auto &edge)
+                            -> std::optional<std::tuple<uint32_t, uint32_t>> {
+                          auto [s, d, i, ts] = edge;
+                          if (i) {
+                            return std::make_tuple(s, d);
+                          } else {
+                            return std::nullopt;
+                          }
+                        }),
+      parlay::map_maybe(slice,
+                        [](const auto &edge)
+                            -> std::optional<std::tuple<uint32_t, uint32_t>> {
+                          auto [s, d, i, ts] = edge;
+                          if (!i) {
+                            return std::make_tuple(s, d);
+                          } else {
+                            return std::nullopt;
+                          }
+                        }));
+}
+
+void test_building_in_batches(long max_edges, long batch_size,
+                              std::string fname) {
+  uint64_t edge_count;
+  uint32_t node_count;
+  auto edges = get_edges_from_file_bin_ts_with_remove(
+      fname, &edge_count, &node_count, true, max_edges);
+
+  auto [first_batch_inserts, first_batch_deletes] =
+      get_inserts_and_deletes(edges.cut(0, edge_count / 2));
+  auto G = build_base_graph(node_count, first_batch_inserts);
+  if (!first_batch_deletes.empty()) {
+    G.delete_edges_batch_inplace(first_batch_deletes.size(),
+                                 first_batch_deletes.data());
+  }
+  size_t insert_idx = edge_count / 2;
+  timer insert_timer;
+  insert_timer.start();
+  while (insert_idx < edge_count) {
+    size_t updates_end = std::min(insert_idx + batch_size, edge_count);
+    auto [batch_inserts, batch_deletes] =
+        get_inserts_and_deletes(edges.cut(insert_idx, updates_end));
+    G.insert_edges_batch_inplace(batch_inserts.size(), batch_inserts.data());
+    G.delete_edges_batch_inplace(batch_deletes.size(), batch_deletes.data());
+    insert_idx = updates_end;
+  }
+  size_t total_throughput = (edge_count / 2) / insert_timer.get_total();
+  std::cout << "batch size " << batch_size << " insert throughput "
+            << total_throughput << "\n";
+  std::cout << "total tree stats\n";
+  G.get_tree_sizes("", "");
+}
+
 void run_test(cpam::commandLine P) {
   std::string test_to_run = P.getOptionValue("-t", "nothing");
   //   size_t rounds = P.getOptionLongValue("-rounds", 3);
@@ -492,6 +547,15 @@ void run_test(cpam::commandLine P) {
     char *iFile = P.getArgument(0);
     std::string fname = std::string(iFile);
     test_building_in_groups(max_edges, group_size, fname, verify);
+  }
+  if (test_to_run == "batch") {
+    uint64_t max_edges =
+        P.getOptionLongValue("-m", std::numeric_limits<long>::max());
+    uint64_t group_size =
+        P.getOptionLongValue("-g", std::numeric_limits<long>::max());
+    char *iFile = P.getArgument(0);
+    std::string fname = std::string(iFile);
+    test_building_in_batches(max_edges, group_size, fname);
   }
 }
 
